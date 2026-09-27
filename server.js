@@ -7,7 +7,44 @@ const dataDir = path.join(root, 'data');
 const dataFile = path.join(dataDir, 'responses.json');
 const port = Number(process.env.PORT || 3000);
 
-function loadResponses() {
+// Upstash Redis or Vercel KV REST credentials
+const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+
+async function loadResponses() {
+  if (kvUrl && kvToken) {
+    try {
+      const res = await fetch(kvUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${kvToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(['LRANGE', 'responses', '0', '-1']),
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        console.error('KV fetch error status:', res.status);
+        return [];
+      }
+      const data = await res.json();
+      if (Array.isArray(data.result)) {
+        return data.result.map(item => {
+          try {
+            return typeof item === 'string' ? JSON.parse(item) : item;
+          } catch {
+            return null;
+          }
+        }).filter(Boolean);
+      }
+      return [];
+    } catch (err) {
+      console.error('Could not load responses from KV:', err.message);
+      return [];
+    }
+  }
+
+  // Fallback to local file
   try {
     const parsed = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
     return Array.isArray(parsed) ? parsed : [];
@@ -16,6 +53,30 @@ function loadResponses() {
     console.error('Could not read response data:', error.message);
     return [];
   }
+}
+
+async function saveResponse(row) {
+  if (kvUrl && kvToken) {
+    const res = await fetch(kvUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${kvToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(['RPUSH', 'responses', JSON.stringify(row)]),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`KV save error (${res.status}): ${text}`);
+    }
+    return;
+  }
+
+  // Fallback to local file
+  fs.mkdirSync(dataDir, { recursive: true });
+  const rows = await loadResponses();
+  rows.push(row);
+  fs.writeFileSync(dataFile, `${JSON.stringify(rows, null, 2)}\n`, { mode: 0o600 });
 }
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
@@ -56,8 +117,11 @@ function summarize(responses) {
   const results = { 'CHECKED': 0, 'CHECK FIRST': 0, 'SEEK ADVICE': 0 };
   const days = {};
   for (const row of responses) {
+    if (!row || !row.answers) continue;
     for (const [key, options] of Object.entries(allowed)) {
-      for (const option of options) counts[key][option] = (counts[key][option] || 0) + (row.answers?.[key] === option ? 1 : 0);
+      for (const option of options) {
+        counts[key][option] = (counts[key][option] || 0) + (row.answers[key] === option ? 1 : 0);
+      }
     }
     if (Object.hasOwn(results, row.result)) results[row.result] += 1;
     if (typeof row.date === 'string') days[row.date] = (days[row.date] || 0) + 1;
@@ -65,8 +129,9 @@ function summarize(responses) {
   return { total: responses.length, results, counts, days };
 }
 
-const server = http.createServer(async (req, res) => {
+const requestHandler = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  
   if (req.method === 'POST' && url.pathname === '/api/responses') {
     try {
       const payload = await readBody(req);
@@ -80,10 +145,8 @@ const server = http.createServer(async (req, res) => {
           ? 'CHECK FIRST'
           : 'CHECKED';
       const row = { date: new Date().toISOString().slice(0, 10), answers, result };
-      fs.mkdirSync(dataDir, { recursive: true });
-      const rows = loadResponses();
-      rows.push(row);
-      fs.writeFileSync(dataFile, `${JSON.stringify(rows, null, 2)}\n`, { mode: 0o600 });
+      
+      await saveResponse(row);
       return send(res, 201, { saved: true, result });
     } catch (error) {
       if (error.message === 'too_large') return send(res, 413, { error: 'Request too large.' });
@@ -94,18 +157,27 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/admin/stats') {
-    return send(res, 200, summarize(loadResponses()));
+    const responses = await loadResponses();
+    return send(res, 200, summarize(responses));
   }
 
-  if (req.method === 'GET' && url.pathname === '/admin') {
+  if (req.method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin.html')) {
     return send(res, 200, fs.readFileSync(path.join(root, 'admin.html'), 'utf8'), 'text/html; charset=utf-8');
   }
 
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
     return send(res, 200, fs.readFileSync(path.join(root, 'index.html'), 'utf8'), 'text/html; charset=utf-8');
   }
+  
   if (req.method === 'GET' && url.pathname === '/favicon.ico') return send(res, 204, '', 'text/plain');
+  
   send(res, 404, { error: 'Not found.' });
-});
+};
 
-server.listen(port, () => console.log(`Safety check running at http://localhost:${port}`));
+const server = http.createServer(requestHandler);
+
+module.exports = requestHandler;
+
+if (require.main === module) {
+  server.listen(port, () => console.log(`Safety check running at http://localhost:${port}`));
+}
