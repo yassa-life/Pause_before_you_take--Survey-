@@ -168,23 +168,46 @@ Because the project uses standard Node.js libraries, **no `npm install` is requi
 
 ---
 
-## 🌐 Production & Vercel Deployment
+## 🌐 Production & Vercel Deployment (with Supabase)
 
-### Deploying to Vercel (with Persistent Cloud Storage)
+Because Vercel runs on ephemeral serverless containers, data must be stored in a cloud database. The app includes built-in support for **Supabase** (Free PostgreSQL):
 
-Because Vercel functions use serverless/ephemeral filesystems, the application is configured to connect seamlessly to **Upstash Redis / Vercel KV** (100% free):
+### 1. Create a Supabase Project
+1. Go to [supabase.com](https://supabase.com/) and create a free project.
+2. In the left sidebar, open the **SQL Editor** -> Click **New query**.
+3. Paste and run the query from [`supabase_schema.sql`](file:///d:/SLIIT/projectr/Binushi/supabase_schema.sql):
+   ```sql
+   create table if not exists responses (
+     id bigint generated always as identity primary key,
+     created_at timestamptz default now(),
+     date text not null,
+     answers jsonb not null,
+     result text not null
+   );
 
-1. **Push your repository to GitHub / GitLab**.
-2. **Import the repository into [Vercel](https://vercel.com/)**.
-3. **Add Free Key-Value Storage**:
-   - In your Vercel Project Dashboard, navigate to the **Storage** tab.
-   - Click **Create Database** -> Choose **KV** (or **Upstash Redis**).
-   - Click **Connect** to link it to your project (this automatically provides `KV_REST_API_URL` and `KV_REST_API_TOKEN`).
-4. **Redeploy**:
-   - Go to **Deployments** -> Click **Redeploy** on the latest deployment.
-   - User submissions and admin analytics will now persist permanently in the cloud!
+   alter table responses enable row level security;
 
-> **Note**: When running locally without cloud credentials, the app automatically falls back to saving in `data/responses.json`.
+   drop policy if exists "Allow anonymous inserts" on responses;
+   drop policy if exists "Allow read access" on responses;
+
+   create policy "Allow anonymous inserts" on responses
+     for insert with check (true);
+
+   create policy "Allow read access" on responses
+     for select using (true);
+   ```
+
+### 2. Add Environment Variables to Vercel
+1. In your Supabase project: Go to **Project Settings** -> **API**.
+2. Copy your **Project URL** and **anon / public key**.
+3. In your **Vercel Project Dashboard**:
+   - Go to **Settings** -> **Environment Variables**.
+   - Add:
+     - `SUPABASE_URL` = `https://your-project-id.supabase.co`
+     - `SUPABASE_ANON_KEY` = `your-anon-public-key`
+4. **Redeploy** on Vercel.
+
+> **Note**: If `SUPABASE_URL` is not set (e.g. running offline locally), the app automatically falls back to saving responses locally in `data/responses.json`.
 
 ---
 

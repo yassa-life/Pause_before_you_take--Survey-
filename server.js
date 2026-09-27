@@ -3,15 +3,74 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = __dirname;
+
+// Auto-load .env file if present (zero dependencies)
+const envFile = path.join(root, '.env');
+if (fs.existsSync(envFile)) {
+  try {
+    const lines = fs.readFileSync(envFile, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx !== -1) {
+        const key = trimmed.slice(0, eqIdx).trim();
+        let val = trimmed.slice(eqIdx + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1);
+        }
+        if (!process.env[key]) {
+          process.env[key] = val;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Could not parse .env file:', err.message);
+  }
+}
+
 const dataDir = path.join(root, 'data');
 const dataFile = path.join(dataDir, 'responses.json');
 const port = Number(process.env.PORT || 3000);
 
-// Upstash Redis or Vercel KV REST credentials
+// Supabase REST configuration - handles standard, Next.js, and Service Role variable names
+const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY || 
+                    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 
+                    process.env.SUPABASE_KEY || 
+                    process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+// Fallback cloud storage: Upstash Redis / Vercel KV REST
 const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
 const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
 async function loadResponses() {
+  // 1. Supabase
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const endpoint = `${supabaseUrl.replace(/\/$/, '')}/rest/v1/responses?select=date,answers,result&order=created_at.asc`;
+      const res = await fetch(endpoint, {
+        headers: {
+          apikey: supabaseKey,
+          Authorization: `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json',
+        },
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error('Supabase fetch error:', res.status, errText);
+        return [];
+      }
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
+    } catch (err) {
+      console.error('Could not load responses from Supabase:', err.message);
+      return [];
+    }
+  }
+
+  // 2. Upstash / KV
   if (kvUrl && kvToken) {
     try {
       const res = await fetch(kvUrl, {
@@ -44,7 +103,7 @@ async function loadResponses() {
     }
   }
 
-  // Fallback to local file
+  // 3. Fallback to local file
   try {
     const parsed = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
     return Array.isArray(parsed) ? parsed : [];
@@ -56,6 +115,31 @@ async function loadResponses() {
 }
 
 async function saveResponse(row) {
+  // 1. Supabase
+  if (supabaseUrl && supabaseKey) {
+    const endpoint = `${supabaseUrl.replace(/\/$/, '')}/rest/v1/responses`;
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        apikey: supabaseKey,
+        Authorization: `Bearer ${supabaseKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        date: row.date,
+        answers: row.answers,
+        result: row.result,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Supabase save error (${res.status}): ${text}`);
+    }
+    return;
+  }
+
+  // 2. Upstash / KV
   if (kvUrl && kvToken) {
     const res = await fetch(kvUrl, {
       method: 'POST',
@@ -72,7 +156,7 @@ async function saveResponse(row) {
     return;
   }
 
-  // Fallback to local file
+  // 3. Fallback to local file
   fs.mkdirSync(dataDir, { recursive: true });
   const rows = await loadResponses();
   rows.push(row);
