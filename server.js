@@ -247,10 +247,16 @@ const requestHandler = async (req, res) => {
     return send(res, 204, '', 'text/plain');
   }
 
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const pathname = url.pathname;
+  const rawUrl = req.headers['x-vercel-original-url'] || 
+                 req.headers['x-matched-path'] || 
+                 req.headers['x-forwarded-uri'] || 
+                 req.url || '';
 
-  if (req.method === 'POST' && (pathname === '/api/responses' || pathname.endsWith('/responses') || pathname === '/api')) {
+  const parsedUrl = new URL(rawUrl.startsWith('http') ? rawUrl : `http://${req.headers.host || 'localhost'}${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`);
+  const pathname = parsedUrl.pathname;
+
+  // 1. Submit survey check response
+  if (req.method === 'POST' && (pathname.includes('responses') || req.url.includes('responses') || pathname === '/api')) {
     try {
       const payload = await readBody(req);
       if (!payload || Object.entries(allowed).some(([key, values]) => !values.includes(payload[key])) || Object.keys(payload).some(key => !Object.hasOwn(allowed, key))) {
@@ -274,15 +280,18 @@ const requestHandler = async (req, res) => {
     }
   }
 
-  if (pathname === '/api/admin/stats' || pathname.endsWith('/stats')) {
+  // 2. Fetch admin stats
+  if (pathname.includes('stats') || req.url.includes('stats')) {
     const responses = await loadResponses();
     return send(res, 200, summarize(responses));
   }
 
+  // 3. Static admin page
   if (req.method === 'GET' && (pathname === '/admin' || pathname === '/admin.html')) {
     return send(res, 200, fs.readFileSync(path.join(root, 'admin.html'), 'utf8'), 'text/html; charset=utf-8');
   }
 
+  // 4. Static index page
   if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
     return send(res, 200, fs.readFileSync(path.join(root, 'index.html'), 'utf8'), 'text/html; charset=utf-8');
   }
