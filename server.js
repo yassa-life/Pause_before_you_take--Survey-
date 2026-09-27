@@ -34,17 +34,20 @@ const dataFile = path.join(dataDir, 'responses.json');
 const port = Number(process.env.PORT || 3000);
 
 // Supabase REST configuration - handles standard, Next.js, and Service Role variable names
-const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY || 
-                    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 
-                    process.env.SUPABASE_KEY || 
-                    process.env.SUPABASE_SERVICE_ROLE_KEY;
+const getSupabaseUrl = () => process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const getSupabaseKey = () => process.env.SUPABASE_ANON_KEY || 
+                             process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 
+                             process.env.SUPABASE_KEY || 
+                             process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 // Fallback cloud storage: Upstash Redis / Vercel KV REST
-const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
-const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+const getKvUrl = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+const getKvToken = () => process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
 async function loadResponses() {
+  const supabaseUrl = getSupabaseUrl();
+  const supabaseKey = getSupabaseKey();
+
   // 1. Supabase
   if (supabaseUrl && supabaseKey) {
     try {
@@ -71,6 +74,8 @@ async function loadResponses() {
   }
 
   // 2. Upstash / KV
+  const kvUrl = getKvUrl();
+  const kvToken = getKvToken();
   if (kvUrl && kvToken) {
     try {
       const res = await fetch(kvUrl, {
@@ -115,6 +120,9 @@ async function loadResponses() {
 }
 
 async function saveResponse(row) {
+  const supabaseUrl = getSupabaseUrl();
+  const supabaseKey = getSupabaseKey();
+
   // 1. Supabase
   if (supabaseUrl && supabaseKey) {
     const endpoint = `${supabaseUrl.replace(/\/$/, '')}/rest/v1/responses`;
@@ -140,6 +148,8 @@ async function saveResponse(row) {
   }
 
   // 2. Upstash / KV
+  const kvUrl = getKvUrl();
+  const kvToken = getKvToken();
   if (kvUrl && kvToken) {
     const res = await fetch(kvUrl, {
       method: 'POST',
@@ -168,12 +178,27 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
     'Content-Type': type,
     'X-Content-Type-Options': 'nosniff',
     'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Referrer-Policy': 'no-referrer',
   });
   res.end(type.startsWith('application/json') ? JSON.stringify(body) : body);
 }
 
 function readBody(req) {
+  // Support Vercel serverless pre-parsed body
+  if (req.body && typeof req.body === 'object') {
+    return Promise.resolve(req.body);
+  }
+  if (typeof req.body === 'string') {
+    try {
+      return Promise.resolve(JSON.parse(req.body));
+    } catch {
+      return Promise.reject(new Error('invalid_json'));
+    }
+  }
+
   return new Promise((resolve, reject) => {
     let raw = '';
     req.setEncoding('utf8');
@@ -182,7 +207,11 @@ function readBody(req) {
       if (raw.length > 4096) reject(new Error('too_large'));
     });
     req.on('end', () => {
-      try { resolve(JSON.parse(raw)); } catch { reject(new Error('invalid_json')); }
+      try {
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch {
+        reject(new Error('invalid_json'));
+      }
     });
     req.on('error', reject);
   });
@@ -214,9 +243,14 @@ function summarize(responses) {
 }
 
 const requestHandler = async (req, res) => {
+  if (req.method === 'OPTIONS') {
+    return send(res, 204, '', 'text/plain');
+  }
+
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  
-  if (req.method === 'POST' && url.pathname === '/api/responses') {
+  const pathname = url.pathname;
+
+  if (req.method === 'POST' && (pathname === '/api/responses' || pathname.endsWith('/responses') || pathname === '/api')) {
     try {
       const payload = await readBody(req);
       if (!payload || Object.entries(allowed).some(([key, values]) => !values.includes(payload[key])) || Object.keys(payload).some(key => !Object.hasOwn(allowed, key))) {
@@ -240,20 +274,20 @@ const requestHandler = async (req, res) => {
     }
   }
 
-  if (url.pathname === '/api/admin/stats') {
+  if (pathname === '/api/admin/stats' || pathname.endsWith('/stats')) {
     const responses = await loadResponses();
     return send(res, 200, summarize(responses));
   }
 
-  if (req.method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin.html')) {
+  if (req.method === 'GET' && (pathname === '/admin' || pathname === '/admin.html')) {
     return send(res, 200, fs.readFileSync(path.join(root, 'admin.html'), 'utf8'), 'text/html; charset=utf-8');
   }
 
-  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+  if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
     return send(res, 200, fs.readFileSync(path.join(root, 'index.html'), 'utf8'), 'text/html; charset=utf-8');
   }
   
-  if (req.method === 'GET' && url.pathname === '/favicon.ico') return send(res, 204, '', 'text/plain');
+  if (req.method === 'GET' && pathname === '/favicon.ico') return send(res, 204, '', 'text/plain');
   
   send(res, 404, { error: 'Not found.' });
 };
